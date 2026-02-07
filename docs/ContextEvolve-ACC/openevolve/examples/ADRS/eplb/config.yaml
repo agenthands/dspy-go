@@ -1,0 +1,169 @@
+# Configuration for function minimization example
+# max_iterations: 1000
+max_iterations: 300
+checkpoint_interval: 10
+log_level: "INFO"
+
+max_code_length: 65536
+
+# LLM configuration
+llm:
+  primary_model: "google/gemini-3-flash-preview"
+  primary_model_weight: 0.2
+  secondary_model: "qwen/qwen3-235b-a22b-2507"
+  secondary_model_weight: 0.8
+  api_base: "https://openrouter.ai/api/v1"
+  api_key: "${GEMINI_API_KEY}"  # 从环境变量读取 API key
+  temperature: 0.7
+  timeout: 600
+  top_p: 0.95
+  max_tokens: 131072
+
+# Prompt configuration
+prompt:
+  system_message: "You are an expert programmer specializing in optimization algorithms. Your task is to improve the Mixture-of-Expert models Expert Parallelism Load Balancer (MoE EPLB) expert rearrangement algorithm.
+
+  This algorithm will take the load metrics recorded by the vLLM server, and rearrange the experts to balance the load. It can make replicas of some experts to achieve better load balancing.
+
+  Your goal will be two-fold:
+  1. Improve the algorithm to achieve better load balancing;
+  2. Improve the algorithm to be more efficient, i.e. reduce the execution time of the algorithm itself, since perfect load balancing is NP-hard.
+  
+  The current algorithm is implemented in the `rebalance_experts` function.
+  "
+  num_top_programs: 5
+  num_diverse_programs: 5
+  num_inspirations: 5
+  num_references: 6
+  use_template_stochasticity: true
+
+# Database configuration
+database:
+  # population_size: 200
+  population_size: 1000
+  # archive_size: 20
+  archive_size: 100
+  # cemetery_size: 100  # Max number of discarded programs to keep in the cemetery.
+  cemetery_size: 200
+  cemetery_sampling_weight: 0.05 # Probability (0.0 to 1.0) of sampling a parent from the cemetery.
+  num_islands: 5
+  migration_interval: 50
+  migration_rate: 0.1
+  elite_selection_ratio: 0.1
+  exploration_ratio: 0.2
+  exploitation_ratio: 0.7
+  feature_dimensions:
+    - "score"
+    - "complexity"
+  feature_bins: 10
+
+# Evaluator configuration
+evaluator:
+  timeout: 60
+  parallel_evaluations: 4
+  use_llm_feedback: false
+  cascade_evaluation: false  # Disable cascade evaluation (no cascade functions implemented)
+
+# Evolution settings
+diff_based_evolution: true
+allow_full_rewrites: false
+rl_mode: true
+
+
+# Multi-agent LLM configuration
+# If not specified, agents will inherit from the default llm config
+multi_agent:
+  # Evolution agent: for code generation/modification
+  evolve:
+    api_base: "https://openrouter.ai/api/v1" 
+    api_key: "${GEMINI_API_KEY}"
+    models:
+      # - name: "google/gemini-3-pro-preview"
+      - name: "google/gemini-3-flash-preview"
+        weight: 0.4
+      - name: "qwen/qwen3-235b-a22b-2507"
+        weight: 0.6
+    temperature: 0.8
+    # max_tokens: 131072
+  
+  # Summary agent: for program summarization
+  summary:
+    api_base: "https://openrouter.ai/api/v1"
+    api_key: "${GEMINI_API_KEY}"
+    models:
+      - name: "qwen/qwen3-235b-a22b-2507"
+        weight: 1.0
+
+
+    temperature: 0.6
+  
+  # Gradient agent: for program critique/gradient generation
+  gradient:
+    api_base: "https://openrouter.ai/api/v1"
+    api_key: "${GEMINI_API_KEY}"
+    models:
+      - name: "google/gemini-3-flash-preview"
+        weight: 0.2
+      - name: "qwen/qwen3-235b-a22b-2507"
+        weight: 0.8
+    # Critique benefits from more creative analysis
+    temperature: 0.8
+    interval: 3      
+  
+  # Sample agent: for reference selection (get_references)
+  sample:
+    api_base: "https://openrouter.ai/api/v1"
+    api_key: "${GEMINI_API_KEY}"
+    models:
+      - name: "qwen/qwen3-235b-a22b-2507"
+        weight: 1.0
+    # Selection needs consistent reasoning
+    temperature: 0.8
+
+  history:
+    rollout_batch_size: 20  # 从population中采样用于gradient合成的样本数量
+    rollout_weight_all_improved: 0.6  # 所有归一化metrics > 0的programs的采样权重
+    rollout_weight_mixed: 0.2          # 归一化metrics混合（有正有负）的programs的采样权重
+    rollout_weight_all_degraded: 0.2   # 所有归一化metrics < 0的programs的采样权重
+
+
+# Debug settings
+debug:
+  simple_debug: true
+  pipeline_debug: true
+  prompt_debug: true
+
+  evolve_prompt_debug: true    
+  summary_prompt_debug: true
+  gradient_prompt_debug: true
+  sample_prompt_debug: true
+  rollout_prompt_debug: true  # Debug for population sampling (normalization, classification, weights)
+
+  evolve_response_debug: true
+  summary_response_debug: true
+  gradient_response_debug: true
+  sample_response_debug: true
+  rollout_response_debug: true  # Debug for population sampling results
+
+
+# model_list:
+#   - name: "google/gemini-3-flash-preview"
+#   - name: "google/gemini-3-pro-preview"
+#   - name: "google/gemini-2.5-flash"
+#   - name: "google/gemini-2.5-pro"
+
+#   - name: "deepseek/deepseek-v3.2"
+#   - name: "deepseek/deepseek-r1"
+
+#   - name: "openai/gpt-5.2"
+#   - name: "openai/gpt-5"
+#   - name: "openai/gpt-5-mini"
+#   - name: "openai/gpt-4o"
+#   - name: "openai/gpt-4o-mini"
+
+#   - name: "anthropic/claude-opus-4.5"
+#   - name: "anthropic/claude-sonnet-4.5"
+
+  # - name: "qwen/qwen3-32b"
+  # - name: "qwen/qwen3-235b-a22b-2507"
+  # - name: "qwen/qwen3-14b"

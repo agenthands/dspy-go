@@ -49,6 +49,24 @@ type InterceptableModule interface {
 	ClearInterceptors()
 }
 
+// DemoConsumer is an interface for modules that can consume demonstrations (examples).
+type DemoConsumer interface {
+	Module
+	SetDemos(demos []Example)
+	GetDemos() []Example
+}
+
+// DemoProvider is an interface for modules that can provide demonstrations.
+type DemoProvider interface {
+	Module
+	GetDemos() []Example
+}
+
+// LMConfigProvider is an interface for modules that can provide LLM configuration.
+type LMConfigProvider interface {
+	GetLLMIdentifier() map[string]string
+}
+
 type Option func(*ModuleOptions)
 
 type StreamHandler func(chunk StreamChunk) error

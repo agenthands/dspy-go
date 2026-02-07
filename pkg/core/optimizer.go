@@ -118,9 +118,108 @@ func NewBootstrapFewShot(maxExamples int) *BootstrapFewShot {
 
 // Compile implements the optimization logic for BootstrapFewShot.
 func (bfs *BootstrapFewShot) Compile(ctx context.Context, program Program, dataset Dataset, metric Metric) (Program, error) {
-	// Implementation of bootstrap few-shot learning
-	// This is a placeholder and should be implemented based on the DSPy paper's description
-	return program, nil
+	// 1. Setup TraceInterceptor on the Teacher (using original program directly to avoid Clone/Closure issues)
+	// We will restore original interceptors after tracing.
+	tracer := NewTraceInterceptor()
+	originalInterceptors := make(map[string][]ModuleInterceptor)
+	
+	for name, mod := range program.Modules {
+		if interceptable, ok := mod.(InterceptableModule); ok {
+			// Save current interceptors
+			current := interceptable.GetInterceptors()
+			originalInterceptors[name] = current
+			
+			// Append tracer
+			newInterceptors := append(current, tracer.Intercept)
+			interceptable.SetInterceptors(newInterceptors)
+		}
+	}
+	
+	// Ensure we restore interceptors even if panic occurs
+	defer func() {
+		for name, mod := range program.Modules {
+			if interceptable, ok := mod.(InterceptableModule); ok {
+				if original, exists := originalInterceptors[name]; exists {
+					interceptable.SetInterceptors(original)
+				}
+			}
+		}
+	}()
+
+	// 4. Trace Generation Loop
+	dataset.Reset()
+	var successfulTraces []TraceEntry
+	
+	// Iterate through the dataset
+	for {
+		example, ok := dataset.Next()
+		if !ok {
+			break
+		}
+
+		// Clear previous traces for this run
+		tracer.Clear()
+
+		// Execute Teacher (Original Program)
+		prediction, err := program.InsertExecState(ctx).Execute(ctx, example.Inputs)
+		if err != nil {
+			continue // Skip failed executions
+		}
+
+		// Evaluate Metric
+		score := metric(example.Outputs, prediction)
+		
+		// If successful (score > 0? or threshold?), we keep the traces as potential demos.
+		// For strict correctness, maybe score == 1.0 or based on config.
+		if score >= 1.0 { // Assuming 1.0 is max score / success
+			traces := tracer.GetTraces()
+			successfulTraces = append(successfulTraces, traces...)
+		}
+	}
+
+	// 3. Create Student as Clone (now that tracing is done)
+	student := program.Clone()
+
+	// 5. Bootstrap Demos into Student
+	// For each module in Student, find corresponding successful traces and add as demos.
+	for name, studentMod := range student.Modules {
+		// Only Predict modules support Demos.
+		// We need to check if it's a Predict module or supports SetDemos.
+		// Interface check: DemoConsumer
+		if consumer, ok := studentMod.(DemoConsumer); ok {
+            var newDemos []Example
+            
+            // Find traces for this module name
+            for _, trace := range successfulTraces {
+                if trace.ModuleName == name || trace.ModuleName == studentMod.GetDisplayName() {
+                    // Convert Trace to Example
+                    demo := Example{
+                        Inputs:  trace.Inputs,
+                        Outputs: trace.Outputs,
+                    }
+                    newDemos = append(newDemos, demo)
+                    
+                    if len(newDemos) >= bfs.MaxExamples {
+                        break
+                    }
+                }
+            }
+            
+            // Set Demos
+            if len(newDemos) > 0 {
+                consumer.SetDemos(newDemos)
+            }
+		}
+	}
+
+	return student, nil
+}
+
+// Helper to ensure context has execution state
+func (p Program) InsertExecState(ctx context.Context) Program {
+    // This is just a helper for the test/compile loop, 
+    // real execution handles this in Execute.
+    return p
 }
 
 type ProgressReporter interface {

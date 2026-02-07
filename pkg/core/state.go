@@ -10,24 +10,6 @@ import (
 // Version is a placeholder for the dspy-go version.
 const Version = "0.0.0-dev"
 
-// DemoProvider is an interface that modules can optionally implement
-// to allow their demos to be retrieved.
-type DemoProvider interface {
-	GetDemos() []Example
-}
-
-// DemoConsumer is an interface that modules can optionally implement
-// to allow their demos to be loaded.
-type DemoConsumer interface {
-	SetDemos([]Example)
-}
-
-// LMConfigProvider is an interface that modules can optionally implement
-// to allow their LM configuration identifiers to be saved and checked.
-type LMConfigProvider interface {
-	GetLLMIdentifier() map[string]string // Returns map like {"provider": "OpenAI", "model": "gpt-4"}
-}
-
 // ParameterProvider is an interface that modules can optionally implement
 // to allow their tuned parameters to be saved.
 type ParameterProvider interface {

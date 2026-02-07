@@ -1,0 +1,21 @@
+*.egg-info
+*.pyc
+__pycache__/
+
+.DS_Store
+
+logs/*
+checkpoints/*
+
+
+.env
+
+
+**/*result*/**
+**/*output*/**
+
+
+# dataset
+expert-load.json
+
+*test*

@@ -1,0 +1,123 @@
+# Configuration for Real-Time Adaptive Signal Processing Example
+max_iterations: 100
+checkpoint_interval: 1
+log_level: "INFO"
+
+# LLM configuration
+llm:
+  primary_model: "google/gemini-3-flash-preview"
+  primary_model_weight: 0.2
+  secondary_model: "qwen/qwen3-235b-a22b-2507"
+  secondary_model_weight: 0.8
+  api_base: "https://openrouter.ai/api/v1"
+  api_key: "${GEMINI_API_KEY}"  # 从环境变量读取 API key
+  temperature: 0.6
+  top_p: 0.95
+  max_tokens: 32000
+
+# Prompt configuration
+prompt:
+  system_message: "You are an expert for model placement on GPUs. Your task is to improve a model placement algorithm by improve the function named compute_model_placement in the intial program that places models to available GPUs. 
+  The algorithm must MINIMIZE the maximum KVPR across all GPUs while ensuring models can fit into the GPUs' memory. Note that KVPR is KV cache pressure for a GPU. It indicates how crowded a GPU is. For a specific GPU, its KVPR is computed as sum(model.req_rate/model.slo for model in models) / (GPU_MEM_SIZE - sum(model.model_size for model in models)), where models are the models on this GPU. The generated program should be as simple as possible and the code should be executed correctly without errors."
+  num_top_programs: 3
+  num_diverse_programs: 3
+  num_inspirations: 3
+  num_references: 4
+  use_template_stochasticity: true
+
+# Database configuration
+database:
+  population_size: 80
+  cemetery_size: 20
+  cemetery_sampling_weight: 0.05
+  archive_size: 30
+  num_islands: 4
+  elite_selection_ratio: 0.15
+  exploitation_ratio: 0.65
+
+# Evaluator configuration
+evaluator:
+  timeout: 90
+  cascade_evaluation: false
+  cascade_thresholds: [0.3, 0.6]
+  parallel_evaluations: 4
+  use_llm_feedback: false
+
+# Evolution settings
+diff_based_evolution: true
+max_code_length: 60000
+rl_mode: true
+
+multi_agent:
+  # Evolution agent: for code generation/modification
+  evolve:
+    api_base: "https://openrouter.ai/api/v1" 
+    api_key: "${GEMINI_API_KEY}"
+    models:
+      # - name: "google/gemini-3-pro-preview"
+      - name: "google/gemini-3-flash-preview"
+        weight: 0.4
+      - name: "qwen/qwen3-235b-a22b-2507"
+        weight: 0.6
+    temperature: 0.8
+    # max_tokens: 131072
+  
+  # Summary agent: for program summarization
+  summary:
+    api_base: "https://openrouter.ai/api/v1"
+    api_key: "${GEMINI_API_KEY}"
+    models:
+      - name: "qwen/qwen3-235b-a22b-2507"
+        weight: 1.0
+
+
+    temperature: 0.6
+  
+  # Gradient agent: for program critique/gradient generation
+  gradient:
+    api_base: "https://openrouter.ai/api/v1"
+    api_key: "${GEMINI_API_KEY}"
+    models:
+      - name: "google/gemini-3-flash-preview"
+        weight: 0.2
+      - name: "qwen/qwen3-235b-a22b-2507"
+        weight: 0.8
+    # Critique benefits from more creative analysis
+    temperature: 0.8
+    interval: 2
+    norm: false
+  
+  # Sample agent: for reference selection (get_references)
+  sample:
+    api_base: "https://openrouter.ai/api/v1"
+    api_key: "${GEMINI_API_KEY}"
+    models:
+      - name: "qwen/qwen3-235b-a22b-2507"
+        weight: 1.0
+    # Selection needs consistent reasoning
+    temperature: 0.8
+
+  history:
+    rollout_batch_size: 20  # 从population中采样用于gradient合成的样本数量
+    rollout_weight_all_improved: 0.6  # 所有归一化metrics > 0的programs的采样权重
+    rollout_weight_mixed: 0.2          # 归一化metrics混合（有正有负）的programs的采样权重
+    rollout_weight_all_degraded: 0.2   # 所有归一化metrics < 0的programs的采样权重
+
+
+# Debug settings
+debug:
+  simple_debug: true
+  pipeline_debug: true
+  prompt_debug: true
+
+  evolve_prompt_debug: true    
+  summary_prompt_debug: true
+  gradient_prompt_debug: true
+  sample_prompt_debug: true
+  rollout_prompt_debug: true  # Debug for population sampling (normalization, classification, weights)
+
+  evolve_response_debug: true
+  summary_response_debug: true
+  gradient_response_debug: true
+  sample_response_debug: true
+  rollout_response_debug: true  # Debug for population sampling results
