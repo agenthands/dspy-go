@@ -25,7 +25,7 @@ type Result struct {
 
 func main() {
 	ctx := context.Background()
-	llm, err := llms.NewOllamaLLM("gpt-oss:latest") 
+	llm, err := llms.NewOllamaLLM("gpt-oss:latest", llms.WithTimeout(300)) 
 	if err != nil {
 		fmt.Printf("Error initializing LLM: %v\n", err)
 		return
@@ -99,6 +99,16 @@ func runSuite(ctx context.Context, tests []TestCase, config AgentConfig) []Resul
 			steps = len(agent.Memory.GetLogs())
 		}
 		
+		if !success {
+			fmt.Printf("\n--- Failure Logs [%s] ---\n", tc.Difficulty)
+			if agent.Memory != nil {
+				for _, log := range agent.Memory.GetLogs() {
+					fmt.Println(log)
+				}
+			}
+			fmt.Println("---------------------------")
+		}
+		
 		results = append(results, Result{
 			Difficulty: tc.Difficulty,
 			Success:    success,
@@ -122,6 +132,44 @@ func SetupAgent(ctx context.Context, llm core.LLM, nums []int, config AgentConfi
 	// Prompt Engineering
 	goal := fmt.Sprintf("Use the numbers %v and basic arithmetic operations (+, -, *, /) to obtain exactly 24. Return the solution steps. Each step should use two numbers. Example: 10 - 4 = 6. 13 - 9 = 4. 6 * 4 = 24. Action MUST be DONE when finished.", nums)
 	
+	// Create Episodic Memory with Few-Shot Examples (Bootstrapping from Paper)
+	episodic := reactree.NewEpisodicMemory()
+	exampleKey := "Use the numbers" // Matches any Game of 24 goal
+	
+	// Example 1: [4, 9, 10, 13] -> 24
+	// Strategy: (13 - 9) * (10 - 4) = 4 * 6 = 24
+	// Decomposition: 
+	// 1. Get 4 from [13, 9]
+	// 2. Get 6 from [10, 4]
+	// 3. Multiply 4 * 6
+	exampleTrace := `
+--- Example ---
+Goal: Use the numbers [4 9 10 13] and basic arithmetic operations (+, -, *, /) to obtain exactly 24.
+Memory: []
+Thought: I need to reach 24. A possible way is 4 * 6. I can make 4 from 13 - 9. I can make 6 from 10 - 4.
+Action: 
+NewSubgoals: ["Obtain 4 using [13, 9]", "Obtain 6 using [10, 4]", "Multiply results"]
+---
+Goal: Obtain 4 using [13, 9]
+Memory: ...
+Thought: 13 - 9 = 4.
+Action: SUCCESS
+NewSubgoals: []
+---
+Goal: Obtain 6 using [10, 4]
+Memory: ...
+Thought: 10 - 4 = 6.
+Action: SUCCESS
+NewSubgoals: []
+---
+Goal: Multiply results
+Memory: ...
+Thought: I have 4 and 6. 4 * 6 = 24.
+Action: DONE
+NewSubgoals: []
+`
+	episodic.Add(exampleKey, exampleTrace)
+
 	sig := core.NewSignature(
 		[]core.InputField{
 			{Field: core.NewTextField("goal")},
@@ -139,7 +187,7 @@ func SetupAgent(ctx context.Context, llm core.LLM, nums []int, config AgentConfi
 	predict := modules.NewPredict(sig)
 	
 	// Create Agent Node
-	agent := reactree.NewAgentNodeWithConfig(goal, predict, nil, config.MaxRetries)
+	agent := reactree.NewAgentNodeWithConfig(goal, predict, episodic, config.MaxRetries)
 	
 	// Configure Search (ToT)
 	if config.NumCandidates > 1 || config.UseScorer {

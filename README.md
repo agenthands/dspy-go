@@ -22,6 +22,8 @@ DSPy-Go is a native Go implementation of the DSPy framework, bringing systematic
 | **Smart Tool Management** | Bayesian selection, chaining, composition, MCP integration |
 | **Quality Optimizers** | GEPA, MIPRO, SIMBA, BootstrapFewShot, COPRO |
 | **Structured Output** | JSON structured output and XML adapters with security controls |
+| **ContextEvolve-ACC** | Evolutionary optimization of programs and content |
+| **ReAcTree** | Hierarchical task planning with tree search (ToT) and backpacking |
 
 ## Installation
 
@@ -97,7 +99,25 @@ signature := core.NewSignature(
 | `ReAct` | Reasoning + tool use |
 | `RLM` | Large context exploration via REPL |
 | `Refine` | Quality improvement through iteration |
+| `Refine` | Quality improvement through iteration |
 | `Parallel` | Concurrent batch processing |
+
+### Advanced Agent Frameworks
+
+#### ContextEvolve-ACC
+A multi-agent evolutionary framework for optimizing content (code, policies, prompts).
+- **Architecture**: `Summarizer` -> `Navigator` -> `Sampler` -> `Evolution` -> `Evaluator`
+- **Features**: Parallel execution (Island Model), Migration, Metric Normalization, Weighted Sampling.
+- **Use Case**: Automated improvement of system prompts or configuration files based on feedback.
+
+#### ReAcTree
+A hierarchical planning framework combining ReAct with Tree Search (Tree of Thoughts).
+- **Features**: 
+  - Dynamic Goal Decomposition (Subgoals)
+  - Candidate Generation & Scoring (Best-of-N)
+  - Recursive Backtracking (Recovery from failures)
+  - Episodic Memory Bootstrapping
+- **Use Case**: Complex multi-step reasoning tasks (e.g., coding, math, navigation).
 
 ### Structured Output
 ```go
@@ -141,10 +161,16 @@ interceptors.ApplyXMLInterceptors(predict, interceptors.DefaultXMLConfig())
 - **[tool_chaining](examples/tool_chaining/)** - Pipeline building
 - **[tool_composition](examples/tool_composition/)** - Composite tools
 
-### Optimizers
+ ### Optimizers
 - **[mipro](examples/others/mipro/)** - TPE-based optimization
 - **[simba](examples/others/simba/)** - Introspective learning
 - **[gepa](examples/others/gepa/)** - Evolutionary optimization
+- **[bootstrap_fewshot](pkg/core/optimizer_test.go)** - Automated few-shot learning (Test Example)
+
+### Advanced Frameworks
+- **[context_evolve](examples/context_evolve/)** - Evolutionary optimization of JSON policies
+- **[reactree](examples/reactree/)** - Hierarchical task planning
+- **[reactree_search](examples/reactree_search/)** - Tree of Thoughts (ToT) logic puzzle solver
 
 ## LLM Providers
 
