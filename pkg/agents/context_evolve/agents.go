@@ -96,19 +96,33 @@ Output the directions directly.`)
 }
 
 func (n *NavigatorAgent) GetGradient(ctx context.Context, history []*Program) (string, error) {
-	// Format history
+	// 1. Calculate stats for the history batch
+	stats := CalculatePopulationStats(history)
+	
+	// 2. Normalize metrics
+	normalized := NormalizeProgramMetrics(history, stats)
+
+	// Format history with normalized metrics
 	var sb strings.Builder
 	for i, p := range history {
-		sb.WriteString(fmt.Sprintf("Attempt %d:\nAbstract: %s\nMetrics: %v\n\n", i+1, p.Abstract, p.Metrics))
+		// Create a string representation of normalized metrics
+		metricsStr := ""
+		if norm, ok := normalized[p.ID]; ok {
+			for k, v := range norm {
+				metricsStr += fmt.Sprintf("%s: %.2f (raw: %v), ", k, v, p.Metrics[k])
+			}
+		}
+		
+		sb.WriteString(fmt.Sprintf("Attempt %d:\nAbstract: %s\nMetrics (Z-Scores): {%s}\n\n", i+1, p.Abstract, metricsStr))
 	}
 
 	result, err := n.predictor.Process(ctx, map[string]interface{}{
-		"history_summary": sb.String(),
+		"history": sb.String(),
 	})
 	if err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("%v", result["optimization_gradient"]), nil
+	return fmt.Sprintf("%v", result["gradient"]), nil
 }
 
 // --- Sampler ---
@@ -157,8 +171,12 @@ func (s *SamplerAgent) SampleFromPopulation(database *ProgramDatabase, batchSize
 		return allPrograms
 	}
 
-	normalizedMetrics := NormalizeMetrics(allPrograms)
-	improved, degraded, mixed := ClassifyPrograms(allPrograms, normalizedMetrics)
+	// 1. Calculate Stats and Normalization
+	stats := CalculatePopulationStats(allPrograms)
+	normalizedMetrics := NormalizeProgramMetrics(allPrograms, stats)
+	
+	// 2. Classify Programs
+	improved, mixed, degraded := ClassifyPrograms(allPrograms, normalizedMetrics)
 
 	// Calculate target counts based on weights
     totalWeight := s.config.Evolution.RolloutWeightAllImproved + s.config.Evolution.RolloutWeightMixed + s.config.Evolution.RolloutWeightAllDegraded

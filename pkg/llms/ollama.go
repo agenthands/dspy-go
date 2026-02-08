@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -287,8 +288,17 @@ func (o *OllamaLLM) generateOpenAI(ctx context.Context, prompt string, options .
 			errors.Fields{"model": o.ModelID()})
 	}
 
+	var contentStr string
+	if openaiResp.Choices[0].Message.Content != nil {
+		if s, ok := openaiResp.Choices[0].Message.Content.(string); ok {
+			contentStr = s
+		} else {
+			contentStr = fmt.Sprintf("%v", openaiResp.Choices[0].Message.Content)
+		}
+	}
+
 	return &core.LLMResponse{
-		Content: openaiResp.Choices[0].Message.Content,
+		Content: contentStr,
 		Usage: &core.TokenInfo{
 			PromptTokens:     openaiResp.Usage.PromptTokens,
 			CompletionTokens: openaiResp.Usage.CompletionTokens,
@@ -700,8 +710,11 @@ func (o *OllamaLLM) GenerateWithFunctions(ctx context.Context, prompt string, fu
 
 // GenerateWithContent implements multimodal content generation.
 func (o *OllamaLLM) GenerateWithContent(ctx context.Context, content []core.ContentBlock, options ...core.GenerateOption) (*core.LLMResponse, error) {
-	// For now, extract text content and fall back to text generation
-	// Future versions could support vision models in Ollama
+	if o.config.UseOpenAIAPI {
+		return o.generateOpenAIWithContent(ctx, content, options...)
+	}
+
+	// For native mode, fallback to text extraction (existing behavior)
 	var textContent string
 	for _, block := range content {
 		if block.Type == core.FieldTypeText {
@@ -711,7 +724,7 @@ func (o *OllamaLLM) GenerateWithContent(ctx context.Context, content []core.Cont
 
 	if textContent == "" {
 		return nil, errors.WithFields(
-			errors.New(errors.UnsupportedOperation, "multimodal content not yet supported for Ollama"),
+			errors.New(errors.UnsupportedOperation, "multimodal content not yet supported for Ollama native API"),
 			errors.Fields{
 				"provider": "ollama",
 				"model":    o.ModelID(),
@@ -719,6 +732,135 @@ func (o *OllamaLLM) GenerateWithContent(ctx context.Context, content []core.Cont
 	}
 
 	return o.Generate(ctx, strings.TrimSpace(textContent), options...)
+}
+
+func (o *OllamaLLM) generateOpenAIWithContent(ctx context.Context, content []core.ContentBlock, options ...core.GenerateOption) (*core.LLMResponse, error) {
+	opts := core.NewGenerateOptions()
+	for _, opt := range options {
+		opt(opts)
+	}
+
+	// Convert content blocks to OpenAI format
+	var openAIMessages []interface{}
+	for _, block := range content {
+		switch block.Type {
+		case core.FieldTypeText:
+			openAIMessages = append(openAIMessages, map[string]interface{}{
+				"type": "text",
+				"text": block.Text,
+			})
+		case core.FieldTypeImage:
+			// Base64 encode image data
+			encoded := base64.StdEncoding.EncodeToString(block.Data)
+			mimeType := block.MimeType
+			if mimeType == "" {
+				mimeType = "image/png"
+			}
+			dataURL := fmt.Sprintf("data:%s;base64,%s", mimeType, encoded)
+			
+			openAIMessages = append(openAIMessages, map[string]interface{}{
+				"type": "image_url",
+				"image_url": map[string]string{
+					"url": dataURL,
+				},
+			})
+		}
+	}
+
+	// Create OpenAI-compatible request
+	req := &openai.ChatCompletionRequest{
+		Model:    string(o.ModelID()),
+		Messages: []openai.ChatCompletionMessage{{
+			Role: "user", 
+			Content: openAIMessages,
+		}},
+		Stream:   false,
+	}
+
+	// Apply generate options using shared helper
+	req.ApplyOptions(coreOptsToOpenAI(opts))
+
+	// Make HTTP request
+	jsonData, err := json.Marshal(req)
+	if err != nil {
+		return nil, errors.WithFields(
+			errors.Wrap(err, errors.InvalidInput, "failed to marshal request"),
+			errors.Fields{"model": o.ModelID()})
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, "POST",
+		o.GetEndpointConfig().BaseURL+"/v1/chat/completions", bytes.NewBuffer(jsonData))
+	if err != nil {
+		return nil, errors.WithFields(
+			errors.Wrap(err, errors.InvalidInput, "failed to create request"),
+			errors.Fields{"model": o.ModelID()})
+	}
+
+	// Set headers
+	for key, value := range o.GetEndpointConfig().Headers {
+		httpReq.Header.Set(key, value)
+	}
+
+	resp, err := o.GetHTTPClient().Do(httpReq)
+	if err != nil {
+		return nil, errors.WithFields(
+			errors.Wrap(err, errors.LLMGenerationFailed, "failed to send request"),
+			errors.Fields{"model": o.ModelID()})
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, errors.WithFields(
+			errors.Wrap(err, errors.LLMGenerationFailed, "failed to read response"),
+			errors.Fields{"model": o.ModelID()})
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, errors.WithFields(
+			errors.New(errors.LLMGenerationFailed, fmt.Sprintf("API request failed with status %d", resp.StatusCode)),
+			errors.Fields{
+				"model":         o.ModelID(),
+				"status_code":   resp.StatusCode,
+				"response_body": string(body),
+			})
+	}
+
+	var openaiResp openai.ChatCompletionResponse
+	if err := json.Unmarshal(body, &openaiResp); err != nil {
+		return nil, errors.WithFields(
+			errors.Wrap(err, errors.InvalidResponse, "failed to unmarshal response"),
+			errors.Fields{
+				"model": o.ModelID(),
+				"body":  string(body[:min(len(body), 100)]),
+			})
+	}
+
+	// Transform to LLMResponse
+	if len(openaiResp.Choices) == 0 {
+		return nil, errors.WithFields(
+			errors.New(errors.InvalidResponse, "no choices in response"),
+			errors.Fields{"model": o.ModelID()})
+	}
+	
+	contentStr, ok := openaiResp.Choices[0].Message.Content.(string)
+	if !ok {
+		// Log warning?
+		contentStr = fmt.Sprintf("%v", openaiResp.Choices[0].Message.Content)
+	}
+
+	return &core.LLMResponse{
+		Content: contentStr,
+		Usage: &core.TokenInfo{
+			PromptTokens:     openaiResp.Usage.PromptTokens,
+			CompletionTokens: openaiResp.Usage.CompletionTokens,
+			TotalTokens:      openaiResp.Usage.TotalTokens,
+		},
+		Metadata: map[string]interface{}{
+			"model":  openaiResp.Model,
+			"mode":   "openai",
+		},
+	}, nil
 }
 
 // StreamGenerateWithContent implements multimodal streaming content generation.
@@ -879,9 +1021,9 @@ func (o *OllamaLLM) parseOpenAIStreamResponse(body io.Reader, chunkChan chan<- c
 				continue
 			}
 
-			if len(streamResp.Choices) > 0 && streamResp.Choices[0].Delta.Content != "" {
-				chunkChan <- core.StreamChunk{
-					Content: streamResp.Choices[0].Delta.Content,
+			if len(streamResp.Choices) > 0 && streamResp.Choices[0].Delta.Content != nil {
+				if content, ok := streamResp.Choices[0].Delta.Content.(string); ok && content != "" {
+					chunkChan <- core.StreamChunk{Content: content}
 				}
 			}
 		}

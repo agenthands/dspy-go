@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -281,8 +282,18 @@ func (o *OpenAILLM) Generate(ctx context.Context, prompt string, options ...core
 		TotalTokens:      response.Usage.TotalTokens,
 	}
 
+	// Handle Content interface{}
+	var contentStr string
+	if response.Choices[0].Message.Content != nil {
+		if s, ok := response.Choices[0].Message.Content.(string); ok {
+			contentStr = s
+		} else {
+			contentStr = fmt.Sprintf("%v", response.Choices[0].Message.Content)
+		}
+	}
+
 	return &core.LLMResponse{
-		Content: response.Choices[0].Message.Content,
+		Content: contentStr,
 		Usage:   usage,
 		Metadata: map[string]interface{}{
 			"finish_reason": response.Choices[0].FinishReason,
@@ -322,7 +333,14 @@ func (o *OpenAILLM) GenerateWithJSON(ctx context.Context, prompt string, options
 		return nil, errors.New(errors.InvalidResponse, "no choices returned from OpenAI API")
 	}
 
-	return utils.ParseJSONResponse(response.Choices[0].Message.Content)
+	var contentStr string
+	if response.Choices[0].Message.Content != nil {
+		if s, ok := response.Choices[0].Message.Content.(string); ok {
+			contentStr = s
+		}
+	}
+
+	return utils.ParseJSONResponse(contentStr)
 }
 
 // GenerateWithFunctions implements the core.LLM interface.
@@ -497,7 +515,12 @@ func (o *OpenAILLM) StreamGenerate(ctx context.Context, prompt string, options .
 			// Process the response
 			if len(streamResponse.Choices) > 0 {
 				choice := streamResponse.Choices[0]
-				content := choice.Delta.Content
+				var content string
+				if choice.Delta.Content != nil {
+					if s, ok := choice.Delta.Content.(string); ok {
+						content = s
+					}
+				}
 
 				if content != "" {
 					chunkChan <- core.StreamChunk{Content: content}

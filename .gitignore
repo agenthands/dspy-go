@@ -36,3 +36,8 @@ docs/.hugo_build.lock
 # Go workspace (local development only)
 go.work
 go.work.sum
+
+# Local testing artifacts
+test_report.txt
+a2a_composition
+.DS_Store

@@ -17,8 +17,8 @@ type ChatCompletionRequest struct {
 
 // ChatCompletionMessage represents a message in the conversation.
 type ChatCompletionMessage struct {
-	Role    string `json:"role"` // "system", "user", "assistant"
-	Content string `json:"content"`
+	Role    string      `json:"role"` // "system", "user", "assistant"
+	Content interface{} `json:"content"`
 }
 
 // ChatCompletionResponse represents a response from the Chat Completions API.

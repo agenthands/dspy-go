@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sort"
 	"sync"
 )
 
@@ -166,33 +167,15 @@ func (db *ProgramDatabase) Migrate(sourceIsland, targetIsland int, count int) in
 	}
 
 	// Sort descending by score
-	// Using a simple bubble sort or similar since standard library sort requires interface or slice
-	// For efficiency with small counts, full sort might be overkill but robust.
-	// Let's use simple logic: find top N.
-    // Or just import sort.
-    // I need to import "sort" package.
+    sort.Slice(candidates, func(i, j int) bool {
+        return candidates[i].Score > candidates[j].Score
+    })
     
-    // START MANUAL SORT for implementation simplicity without extra imports if purely code insertion
-    // But better to use sort.Slice. I will add "sort" to imports in a separate block.
-    
-    // For now, let's assume "sort" is imported or I use a simple selection.
-    // I'll update imports in a separate chunk to be safe.
-    
-    // Simple insertion sort for top K
     migrated := 0
     for i := 0; i < count && i < len(candidates); i++ {
-        // Find max in remaining
-        maxIdx := i
-        for j := i + 1; j < len(candidates); j++ {
-            if candidates[j].Score > candidates[maxIdx].Score {
-                maxIdx = j
-            }
-        }
-        // Swap
-        candidates[i], candidates[maxIdx] = candidates[maxIdx], candidates[i]
-        
-        // Add to target if not present
         targetID := candidates[i].ID
+        
+        // Check if already in target island (to avoid duplicates)
         found := false
         for _, existingID := range db.Islands[targetIsland] {
             if existingID == targetID {
@@ -200,6 +183,7 @@ func (db *ProgramDatabase) Migrate(sourceIsland, targetIsland int, count int) in
                 break
             }
         }
+        
         if !found {
             db.Islands[targetIsland] = append(db.Islands[targetIsland], targetID)
             migrated++

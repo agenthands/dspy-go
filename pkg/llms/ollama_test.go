@@ -733,14 +733,14 @@ func TestOllamaLLM_MultimodalContent(t *testing.T) {
 		assert.Equal(t, "Processed text content", result.Content)
 	})
 
-	t.Run("Non-text content should fail", func(t *testing.T) {
+	t.Run("Non-text content should work in OpenAI mode", func(t *testing.T) {
 		content := []core.ContentBlock{
 			core.NewImageBlock([]byte("fake image data"), "image/jpeg"),
 		}
 
-		_, err := llm.GenerateWithContent(context.Background(), content)
-		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "multimodal content not yet supported")
+		result, err := llm.GenerateWithContent(context.Background(), content)
+		assert.NoError(t, err)
+		assert.Equal(t, "Processed text content", result.Content)
 	})
 
 	t.Run("Streaming with content", func(t *testing.T) {
