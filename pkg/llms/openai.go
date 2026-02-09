@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -346,6 +347,86 @@ func (o *OpenAILLM) GenerateWithJSON(ctx context.Context, prompt string, options
 // GenerateWithFunctions implements the core.LLM interface.
 func (o *OpenAILLM) GenerateWithFunctions(ctx context.Context, prompt string, functions []map[string]interface{}, options ...core.GenerateOption) (map[string]interface{}, error) {
 	return nil, errors.New(errors.UnsupportedOperation, "function calling not yet implemented for OpenAI provider")
+}
+
+// GenerateWithContent implements the core.LLM interface for multimodal content.
+func (o *OpenAILLM) GenerateWithContent(ctx context.Context, content []core.ContentBlock, options ...core.GenerateOption) (*core.LLMResponse, error) {
+	opts := core.NewGenerateOptions()
+	for _, opt := range options {
+		opt(opts)
+	}
+
+	// Convert content blocks to OpenAI format
+	var openAIMessages []interface{}
+	for _, block := range content {
+		switch block.Type {
+		case core.FieldTypeText:
+			openAIMessages = append(openAIMessages, map[string]interface{}{
+				"type": "text",
+				"text": block.Text,
+			})
+		case core.FieldTypeImage:
+			// Base64 encode image data
+			encoded := base64.StdEncoding.EncodeToString(block.Data)
+			mimeType := block.MimeType
+			if mimeType == "" {
+				mimeType = "image/png"
+			}
+			dataURL := fmt.Sprintf("data:%s;base64,%s", mimeType, encoded)
+
+			openAIMessages = append(openAIMessages, map[string]interface{}{
+				"type": "image_url",
+				"image_url": map[string]string{
+					"url": dataURL,
+				},
+			})
+		}
+	}
+
+	request := &openai.ChatCompletionRequest{
+		Model: o.ModelID(),
+		Messages: []openai.ChatCompletionMessage{
+			{
+				Role:    "user",
+				Content: openAIMessages,
+			},
+		},
+	}
+	request.ApplyOptions(coreOptsToOpenAI(opts))
+
+	response, err := o.makeRequest(ctx, request)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(response.Choices) == 0 {
+		return nil, errors.New(errors.InvalidResponse, "no choices returned from OpenAI API")
+	}
+
+	usage := &core.TokenInfo{
+		PromptTokens:     response.Usage.PromptTokens,
+		CompletionTokens: response.Usage.CompletionTokens,
+		TotalTokens:      response.Usage.TotalTokens,
+	}
+
+	var contentStr string
+	if response.Choices[0].Message.Content != nil {
+		if s, ok := response.Choices[0].Message.Content.(string); ok {
+			contentStr = s
+		} else {
+			contentStr = fmt.Sprintf("%v", response.Choices[0].Message.Content)
+		}
+	}
+
+	return &core.LLMResponse{
+		Content: contentStr,
+		Usage:   usage,
+		Metadata: map[string]interface{}{
+			"finish_reason": response.Choices[0].FinishReason,
+			"id":            response.ID,
+			"model":         response.Model,
+		},
+	}, nil
 }
 
 // CreateEmbedding implements the core.LLM interface.
