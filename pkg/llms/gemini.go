@@ -189,7 +189,9 @@ func NewGeminiLLM(apiKey string, model core.ModelID) (*GeminiLLM, error) {
 	switch model {
 	case core.ModelGoogleGeminiPro, core.ModelGoogleGeminiFlash, core.ModelGoogleGeminiFlashLite,
 		core.ModelGoogleGemini3ProPreview, core.ModelGoogleGemini3FlashPreview,
-		core.ModelGoogleGemini20Flash, core.ModelGoogleGemini20FlashLite:
+		core.ModelGoogleGemini20Flash, core.ModelGoogleGemini20FlashLite,
+		"gemini-1.5-flash", "gemini-1.5-pro",
+		"gemini-1.5-flash-latest", "gemini-1.5-flash-001", "gemini-1.5-flash-002":
 		break
 	default:
 		return nil, errors.WithFields(

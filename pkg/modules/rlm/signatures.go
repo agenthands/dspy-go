@@ -45,6 +45,9 @@ func IterationSignature() core.Signature {
 			{Field: core.NewField("repl_state",
 				core.WithDescription("Current REPL variable state"),
 			)},
+			{Field: core.NewField("iteration",
+				core.WithDescription("Current iteration progress (X of Y)"),
+			)},
 		},
 		[]core.OutputField{
 			{Field: core.NewField("reasoning",
@@ -68,93 +71,59 @@ func IterationSignature() core.Signature {
 				core.WithCustomPrefix("Answer:"),
 			)},
 		},
-	).WithInstruction(`You are exploring a large context using a Go REPL.
+	).WithInstruction(`You are tasked with answering a query with associated context. You can access, transform, and analyze this context interactively in a REPL environment that can recursively query sub-LLMs, which you are strongly encouraged to use as much as possible. You will be queried iteratively until you provide a final answer.
 
-OUTPUT FORMAT (REQUIRED - you MUST follow this exact format):
-Each response MUST contain these fields in order:
+The REPL environment is initialized with:
+1. A 'context' variable that contains extremely important information about your query. You should check the content of the 'context' variable to understand what you are working with. Make sure you look through it sufficiently as you answer your query.
+2. A 'llm_query' function that allows you to query an LLM (that can handle around 500K chars) inside your REPL environment. Use this for recursive calls!
+3. A 'llm_query_batched' function that allows you to query multiple prompts concurrently: llm_query_batched(prompts []string) []string. This is much faster than sequential calls when you have multiple independent queries. Results are returned in the same order as the input prompts.
+4. A 'SHOW_VARS()' function that returns all variables you have created in the REPL. Use this to check what variables exist before using FINAL_VAR.
+5. Standard Go functions and the ability to use fmt.Println() to view output.
 
-Reasoning: <your step-by-step thinking>
-Action: <one of: explore, query, compute, final>
-Code: <Go code to execute, or empty if action is final>
-Answer: <the final answer if action is final, otherwise empty>
+You will only be able to see truncated outputs from the REPL environment, so you should use the query LLM function on variables you want to analyze. You will find this function especially useful when you have to analyze the semantics of the context. Use these variables as buffers to build up your final answer.
+Make sure to explicitly look through the entire context in REPL before answering your query. An example strategy is to first look at the context and figure out a chunking strategy, then break up the context into smart chunks, and query an LLM per chunk with a particular question and save the answers to a buffer, then query an LLM with all the buffers to produce your final answer.
 
-Example response format:
-Reasoning: The context is 150K chars. I need to explore its structure first.
-Action: explore
+You can use the REPL environment to help you understand your context, especially if it is huge. Remember that your sub LLMs are powerful -- they can fit around 500K characters in their context window, so don't be afraid to put a lot of context into them. For example, a viable strategy is to feed 10 documents per sub-LLM query. Analyze your input data and see if it is sufficient to just fit it in a few sub-LLM calls!
+
+When you want to execute Go code in the REPL environment, write to the 'Code' field. For example, say we want our recursive model to search for the magic number in the context, and the context is very long, so we want to chunk it:
+Reasoning: The context is very long, so I want to chunk it.
+Action: query
 Code:
 ` + "```go" + `
-fmt.Println("Length:", len(context))
-fmt.Println("Preview:", context[:500])
+chunk := context[:10000]
+answer := llm_query("What is the magic number in the context? Here is the chunk: " + chunk)
+fmt.Println(answer)
 ` + "```" + `
-Answer:
 
-AVAILABLE FUNCTIONS:
-
-QUERY FUNCTIONS (choose based on context size):
-- Query(prompt string) string: Auto-prepends FULL context to prompt. Use for small contexts (<50K chars).
-- QueryRaw(prompt string) string: Sends prompt AS-IS without context. Use when you've already included context in prompt.
-- QueryWith(contextSlice, prompt string) string: Prepends ONLY the slice you specify. Use for large contexts.
-- QueryBatched(prompts []string) []string: Parallel Query() calls. Each gets full context prepended.
-- QueryBatchedRaw(prompts []string) []string: Parallel QueryRaw() calls. No context prepended.
-
-CONTEXT ACCESS FUNCTIONS:
-- FindRelevant(query string, topK int) []string: Semantic search - returns top-K relevant chunks
-- GetChunk(id int) string: Get chunk by ID (chunks are ~4KB each)
-- GetContext(startLine, endLine int) string: Get specific line range
-- ChunkCount() int: Number of chunks
-- LineCount() int: Number of lines
-
-COMPLETION FUNCTIONS:
-- FINAL(value string): Signal completion with a direct value
-- FINAL_VAR(varName string): Signal completion with a variable's value
-
-STANDARD GO: fmt, strings, regexp, strconv, encoding/json, sort
-
-CRITICAL - CONTEXT SIZE HANDLING:
-- Context < 50K chars: Use Query(prompt + context) directly
-- Context 50K-200K chars: Use QueryWith(context, prompt) to control what's sent
-- Context > 200K chars: MUST chunk! Use FindRelevant() or split manually, then QueryWith() or QueryRaw()
-
-WARNING: Query() auto-prepends the ENTIRE context (~4 chars = 1 token). For a 500K char context:
-  Query("analyze: " + context[:100000])  // WRONG! Sends 500K + 100K = 600K chars (overflow!)
-  QueryWith(context[:100000], "analyze") // CORRECT! Sends only 100K chars
-
-LARGE CONTEXT PATTERN:
-// For contexts > 200K chars, chunk and query separately:
-chunks := FindRelevant("main entry points", 5)  // Get relevant chunks
-var results []string
-for _, chunk := range chunks {
-    r := QueryWith(chunk, "Find entry points in this code")
-    results = append(results, r)
+As another example, when the context isn't that long, a simple but viable strategy is to combine chunks and recursively query an LLM over them using llm_query_batched for concurrent processing:
+` + "```go" + `
+chunkSize := len(context) / 10
+var prompts []string
+for i := 0; i < 10; i++ {
+    start := i * chunkSize
+    end := (i + 1) * chunkSize
+    if i == 9 { end = len(context) }
+    prompts = append(prompts, fmt.Sprintf("Try to answer: %s. Here is the context chunk:\n%s", query, context[start:end]))
 }
-combined := strings.Join(results, "\n")
-answer := QueryRaw("Synthesize these findings: " + combined)
-FINAL(answer)
+answers := llm_query_batched(prompts)
+for i, a := range answers { fmt.Printf("Chunk %d: %s\n", i, a) }
+` + "```" + `
 
-CRITICAL CODE RULES (violations cause errors):
-- DO NOT use 'import' statements - packages are already imported
-- DO NOT use 'type' declarations - use map[string]interface{} or inline structs
-- DO NOT use 'func' declarations at top level - use closures if needed
-- Write ONLY executable statements (assignments, function calls, loops, conditionals)
-- EVERY variable must be declared with := before use
-- Keep code blocks SHORT (under 15 lines)
+IMPORTANT: When you are done with the iterative process, you MUST provide a final answer inside a FINAL function. You have two options:
+1. Use FINAL(your_answer_variable) to provide the answer directly in a Go code block
+2. Use FINAL_VAR("variable_name") to return a variable you have created in the REPL environment as your final output
 
-CRITICAL - SIGNALING COMPLETION:
-When you have the answer, IMMEDIATELY call FINAL() in the SAME code block!
+WARNING - COMMON MISTAKE: FINAL_VAR retrieves an EXISTING variable. You MUST create and assign the variable in a code block FIRST, then call FINAL_VAR in a SEPARATE step.
 
-ACTIONS:
-- explore: Write code to examine the context (len, preview, structure)
-- query: Write code to call Query/QueryWith/QueryRaw for analysis
-- compute: Write code to process/combine results
-- subrlm: Spawn a nested RLM loop with a SubQuery (for complex sub-tasks that need their own iteration)
-- final: Provide the answer (no more code needed)
+Think step by step carefully, plan, and execute this plan immediately in your response -- do not just say "I will do this" or "I will do that". Output to the REPL environment and recursive LLMs as much as possible. Remember to explicitly answer the original query in your final answer.
 
-SUBRLM ACTION (for complex multi-step sub-tasks):
-When a sub-task is too complex for a single Query call, use action="subrlm" with a SubQuery.
-The sub-RLM shares all REPL variables and can set new ones. Its result is stored in 'subrlm_result'.
-Example: SubQuery: "Find all authentication-related code sections and summarize their functionality"
+CODE RULES:
+- DO NOT use 'import' statements.
+- DO NOT use 'type' or top-level 'func' declarations.
+- Every variable must be declared with := before use.
 
-REMEMBER: You MUST start your response with "Reasoning:" and include all five fields.`)
+OUTPUT FORMAT (REQUIRED):
+Each response MUST contain: Reasoning, Action, Code, and Answer.`)
 }
 
 // SubQuerySignature defines the signature for sub-LLM queries.
@@ -397,6 +366,39 @@ FINAL(answer)`,
 				"answer":   "",
 			},
 		},
+		// Example using Search and GetDocument tools for information retrieval
+		{
+			Inputs: map[string]interface{}{
+				"context_info": "empty context, access to Search/GetDocument tools",
+				"query":        "What is the capital of France?",
+				"history":      "",
+				"repl_state":   "context: <empty>",
+			},
+			Outputs: map[string]interface{}{
+				"reasoning": "I need to find information about France's capital. I'll use the Search tool.",
+				"action":    "query",
+				"code": `results := Search("capital of France")
+fmt.Println(results)`,
+				"subquery": "",
+				"answer":   "",
+			},
+		},
+		{
+			Inputs: map[string]interface{}{
+				"context_info": "empty context, access to Search/GetDocument tools",
+				"query":        "What is the capital of France?",
+				"history":      "Search results: [1] DocID: doc_123\nParis is the capital of France...",
+				"repl_state":   "context: <empty>, results: ...",
+			},
+			Outputs: map[string]interface{}{
+				"reasoning": "The search result mentions doc_123. I'll retrieve the full document to be sure.",
+				"action":    "query",
+				"code": `doc := GetDocument("doc_123")
+fmt.Println(doc)`,
+				"subquery": "",
+				"answer":   "",
+			},
+		},
 		// Example using subrlm action for complex multi-step analysis
 		{
 			Inputs: map[string]interface{}{
@@ -413,20 +415,22 @@ FINAL(answer)`,
 				"answer":    "",
 			},
 		},
-		// Example using subrlm result in subsequent iteration
+		// Example demonstrating CodeQA-like logic for complex reasoning
 		{
 			Inputs: map[string]interface{}{
-				"context_info": "string, 800000 chars",
-				"query":        "Analyze the authentication system and identify security issues",
-				"history":      "Sub-RLM completed: Found JWT token handling, password hashing with bcrypt, session cookies, OAuth2 integration",
-				"repl_state":   "context: <loaded>, subrlm_result: 'JWT tokens use HS256, passwords hashed with bcrypt cost 10, sessions stored in Redis'",
+				"context_info": "Python function (html_to_xhtml)",
+				"query":        "How do all tags in an html tree convert to xhtml ?",
+				"history":      "",
+				"repl_state":   "context: <loaded>",
 			},
 			Outputs: map[string]interface{}{
-				"reasoning": "The sub-RLM found the authentication components. Now I have the details in subrlm_result. I can spawn another sub-RLM to analyze these specific areas for vulnerabilities.",
-				"action":    "subrlm",
-				"code":      "",
-				"subquery":  "Analyze this authentication implementation for security vulnerabilities: " + "JWT tokens use HS256, passwords hashed with bcrypt cost 10, sessions stored in Redis",
-				"answer":    "",
+				"reasoning": "I need to analyze how the tags are processed in the html_to_xhtml function. I'll use llm_query to understand the logic specifically for tag conversion.",
+				"action":    "query",
+				"code": `answer := llm_query("Identify the logic responsible for converting tags to XHTML in this code: " + context)
+fmt.Println(answer)
+FINAL(answer)`,
+				"subquery": "",
+				"answer":   "",
 			},
 		},
 	}
@@ -453,4 +457,3 @@ func SubQueryDemos() []core.Example {
 		},
 	}
 }
-

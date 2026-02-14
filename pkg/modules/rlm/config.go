@@ -5,8 +5,18 @@ package rlm
 
 import "time"
 
+// EnvironmentType defines the supported execution environments.
+type EnvironmentType string
+
+const (
+	EnvYaegi  EnvironmentType = "yaegi"
+	EnvMangle EnvironmentType = "mangle"
+)
+
 // Config holds RLM configuration.
 type Config struct {
+	// EnvironmentType selects the execution backend (default: EnvYaegi).
+	EnvironmentType EnvironmentType
 	// MaxIterations is the maximum number of iteration loops (default: 30).
 	MaxIterations int
 
@@ -36,6 +46,10 @@ type Config struct {
 	// OutputTruncation configures output truncation settings.
 	// Controls max lengths for execution output, variable previews, and history entries.
 	OutputTruncation *OutputTruncationConfig
+
+	// CustomTools allows injecting custom Go functions into the REPL environment.
+	// The map key is the function name, and the value is the function itself.
+	CustomTools map[string]any
 
 	// OnProgress is called at the start of each iteration with progress info.
 	// Can be used to display progress to users or implement custom termination logic.
@@ -139,15 +153,24 @@ type IterationProgress struct {
 // DefaultConfig returns the default RLM configuration.
 func DefaultConfig() Config {
 	return Config{
-		MaxIterations: 30,
-		Verbose:       false,
-		Timeout:       0,
-		TraceDir:      "",
+		EnvironmentType: EnvYaegi,
+		MaxIterations:   30,
+		Verbose:         false,
+		Timeout:         0,
+		TraceDir:        "",
+		CustomTools:     make(map[string]any),
 	}
 }
 
 // Option configures the RLM.
 type Option func(*Config)
+
+// WithMangle enables Mangle Datalog environment using google/mangle.
+func WithMangle() Option {
+	return func(c *Config) {
+		c.EnvironmentType = EnvMangle
+	}
+}
 
 // WithMaxIterations sets the maximum number of iterations.
 // Values <= 0 are ignored and the default is used.
@@ -304,5 +327,18 @@ func DefaultOutputTruncationConfig() OutputTruncationConfig {
 		MaxOutputLen:       5000,
 		MaxVarPreviewLen:   100,
 		MaxHistoryEntryLen: 1000,
+	}
+}
+
+// WithTools registers custom Go functions to be available in the RLM environment.
+// The tools map maps function names to their Go implementations.
+func WithTools(tools map[string]any) Option {
+	return func(c *Config) {
+		if c.CustomTools == nil {
+			c.CustomTools = make(map[string]any)
+		}
+		for name, tool := range tools {
+			c.CustomTools[name] = tool
+		}
 	}
 }

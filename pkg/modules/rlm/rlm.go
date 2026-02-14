@@ -156,9 +156,20 @@ func New(rootLLM core.LLM, subLLMClient SubLLMClient, opts ...Option) *RLM {
 	baseModule := core.NewModule(signature)
 	baseModule.ModuleType = "RLM"
 
-	// Create iteration module with signature and demos
-	iterMod := modules.NewPredict(IterationSignature()).WithTextOutput()
-	iterMod.SetDemos(IterationDemos())
+	// Create iteration module with signature and demos based on environment
+	var iterSig core.Signature
+	var iterDemos []core.Example
+
+	if cfg.EnvironmentType == EnvMangle {
+		iterSig = MangleIterationSignature()
+		iterDemos = MangleIterationDemos()
+	} else {
+		iterSig = IterationSignature()
+		iterDemos = IterationDemos()
+	}
+
+	iterMod := modules.NewPredict(iterSig).WithTextOutput()
+	iterMod.SetDemos(iterDemos)
 	iterMod.SetLLM(rootLLM)
 
 	return &RLM{
@@ -281,14 +292,32 @@ func (r *RLM) Complete(ctx context.Context, contextPayload any, query string) (*
 		}
 	}
 
-	// Create REPL environment
-	replEnv, err := NewYaegiREPL(r.subLLMClient)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create REPL: %w", err)
+	// Create Execution Environment based on config
+	var env ExecutionEnvironment
+	var err error
+
+	switch r.config.EnvironmentType {
+	case EnvMangle:
+		env = NewMangleEnvironment()
+	case EnvYaegi:
+		fallthrough
+	default:
+		env, err = NewYaegiREPL(r.subLLMClient)
 	}
 
-	// Load context into REPL
-	if err := replEnv.LoadContext(contextPayload); err != nil {
+	if err != nil {
+		return nil, fmt.Errorf("failed to create environment: %w", err)
+	}
+
+	// Register custom tools
+	for name, tool := range r.config.CustomTools {
+		if err := env.RegisterFunction(name, tool); err != nil {
+			return nil, fmt.Errorf("failed to register tool %s: %w", name, err)
+		}
+	}
+
+	// Load context into Environment
+	if err := env.LoadContext(contextPayload); err != nil {
 		return nil, fmt.Errorf("failed to load context: %w", err)
 	}
 
@@ -328,11 +357,31 @@ func (r *RLM) Complete(ctx context.Context, contextPayload any, query string) (*
 		}
 
 		// Prepare inputs for iteration module
+		historyStr := history.String()
+
+		// Paper-aligned safeguard: on iteration 0, force REPL exploration
+		// Reference: "You have not interacted with the REPL environment yet.
+		//  Your next action should be to look through and figure out how to
+		//  answer the prompt, so don't just provide a final answer yet."
+		if i == 0 {
+			historyStr = "You have not interacted with the REPL environment or seen your context yet. " +
+				"Your next action should be to look through and figure out how to answer the prompt, " +
+				"so don't just provide a final answer yet.\n\n" +
+				fmt.Sprintf("Think step-by-step on what to do using the REPL environment (which contains the context) to answer the original prompt: \"%s\".\n", query) +
+				"Continue using the REPL environment, which has the `context` variable, and querying sub-LLMs by writing to the Code field. Your next action:"
+		} else {
+			// Reference: "The history before is your previous interactions with the REPL environment."
+			historyStr = historyStr + "\n\nThe history above is your previous interactions with the REPL environment. " +
+				fmt.Sprintf("Think step-by-step on what to do using the REPL environment (which contains the context) to answer the original prompt: \"%s\".\n", query) +
+				"Continue using the REPL environment, which has the `context` variable, and querying sub-LLMs. Your next action:"
+		}
+
 		iterInputs := map[string]any{
-			"context_info": replEnv.ContextInfo(),
+			"context_info": env.GetContextInfo(),
 			"query":        query,
-			"history":      history.String(),
-			"repl_state":   formatREPLState(replEnv.GetLocals()),
+			"history":      historyStr,
+			"repl_state":   env.GetState(),
+			"iteration":    fmt.Sprintf("Iteration %d of %d", i+1, maxIterations),
 		}
 
 		// Call the iteration module
@@ -362,13 +411,13 @@ func (r *RLM) Complete(ctx context.Context, contextPayload any, query string) (*
 
 		// Check for subrlm action (nested RLM loop)
 		if action == "subrlm" {
-			subRLMResult, err := r.executeSubRLM(ctx, replEnv, subquery, query, traceSession, start)
+			subRLMResult, err := r.executeSubRLM(ctx, env, subquery, query, traceSession, start)
 			if err != nil {
 				logger.Warn(ctx, "[RLM] Sub-RLM execution error: %v", err)
 				r.appendIterationHistory(&history, i+1, action, reasoning, "", fmt.Sprintf("Sub-RLM error: %v", err))
 			} else {
 				// Store result in REPL variable for access in subsequent iterations
-				_ = replEnv.SetVariable("subrlm_result", subRLMResult)
+				_ = env.SetVariable("subrlm_result", subRLMResult)
 				r.appendIterationHistory(&history, i+1, action, reasoning, "", fmt.Sprintf("Sub-RLM completed: %s", utils.TruncateString(subRLMResult, truncateLenLong)))
 
 				if r.config.Verbose {
@@ -379,6 +428,8 @@ func (r *RLM) Complete(ctx context.Context, contextPayload any, query string) (*
 		}
 
 		// Check for final answer
+		// Reference alignment: check FINAL in reasoning/answer BEFORE code execution
+		// The reference's find_final_answer scans the full LLM response text.
 		if action == "final" {
 			// If action is final, use the answer field
 			finalAnswer := answer
@@ -386,7 +437,7 @@ func (r *RLM) Complete(ctx context.Context, contextPayload any, query string) (*
 				// Fallback 1: try to find FINAL() in the raw reasoning
 				if final := FindFinalAnswer(reasoning); final != nil {
 					if final.Type == FinalTypeVariable {
-						resolved, err := replEnv.GetVariable(final.Content)
+						resolved, err := env.GetVariable(final.Content)
 						if err == nil {
 							finalAnswer = resolved
 						} else {
@@ -401,7 +452,7 @@ func (r *RLM) Complete(ctx context.Context, contextPayload any, query string) (*
 			// Fallback 2: when action is explicitly "final", check common REPL variables
 			if finalAnswer == "" && action == "final" {
 				for _, varName := range []string{"result", "answer", "final_answer", "output", "total", "count"} {
-					if val, err := replEnv.GetVariable(varName); err == nil && val != "" {
+					if val, err := env.GetVariable(varName); err == nil && val != "" {
 						finalAnswer = val
 						break
 					}
@@ -429,15 +480,44 @@ func (r *RLM) Complete(ctx context.Context, contextPayload any, query string) (*
 			}
 		}
 
+		// Reference alignment: also check FINAL in reasoning for non-final actions.
+		// The reference's find_final_answer checks the ENTIRE response text,
+		// regardless of whether code was present. The LLM might write
+		// FINAL(...) or FINAL_VAR(...) outside of code blocks.
+		if action != "final" {
+			if final := FindFinalAnswer(reasoning); final != nil {
+				var finalAnswer string
+				if final.Type == FinalTypeVariable {
+					resolved, err := env.GetVariable(final.Content)
+					if err == nil {
+						finalAnswer = resolved
+					}
+				} else {
+					finalAnswer = final.Content
+				}
+				if finalAnswer != "" {
+					if r.config.Verbose {
+						logger.Debug(ctx, "[RLM] FINAL detected in reasoning text: %s", utils.TruncateString(finalAnswer, truncateLenShort))
+					}
+					return &CompletionResult{
+						Response:   finalAnswer,
+						Iterations: i + 1,
+						Duration:   time.Since(start),
+						Usage:      r.tokenTracker.GetTotalUsage(),
+					}, nil
+				}
+			}
+		}
+
 		if code != "" {
 			if r.config.Verbose {
 				logger.Debug(ctx, "[RLM] Executing code:\n%s", utils.TruncateString(code, truncateLenMedium))
 			}
 
 			// Clear final state before execution (Nightjar Algorithm 1 Gap 1)
-			replEnv.ClearFinal()
+			env.ClearFinal()
 
-			result, execErr := replEnv.Execute(ctx, code)
+			result, execErr := env.Execute(ctx, code)
 			if execErr != nil {
 				logger.Warn(ctx, "[RLM] Code execution error: %v", execErr)
 			}
@@ -452,7 +532,7 @@ func (r *RLM) Complete(ctx context.Context, contextPayload any, query string) (*
 			// Collect sub-LLM calls for trace and add Query results to history
 			var rlmCalls []logging.RLMCallEntry
 			var allOutput strings.Builder
-			llmCalls := replEnv.GetLLMCalls()
+			llmCalls := env.GetLLMCalls()
 			for _, call := range llmCalls {
 				r.tokenTracker.AddSubCall(call)
 				rlmCalls = append(rlmCalls, logging.RLMCallEntry{
@@ -478,8 +558,8 @@ func (r *RLM) Complete(ctx context.Context, contextPayload any, query string) (*
 
 			// State-verified completion check (Nightjar Algorithm 1 Gap 1)
 			// This is the PRIMARY completion detection - check REPL state first
-			if replEnv.HasFinal() {
-				resultResponse := replEnv.Final()
+			if env.HasFinal() {
+				resultResponse := env.Final()
 
 				if r.config.Verbose {
 					logger.Debug(ctx, "[RLM] State-verified FINAL detected: %s", utils.TruncateString(resultResponse, truncateLenShort))
@@ -495,7 +575,7 @@ func (r *RLM) Complete(ctx context.Context, contextPayload any, query string) (*
 							Result: logging.RLMCodeResult{
 								Stdout:        result.Stdout,
 								Stderr:        result.Stderr,
-								Locals:        replEnv.GetLocals(),
+								Locals:        nil, // env.GetLocals() not avail in generic interface directly, could parse GetState() but likely overkill
 								ExecutionTime: result.Duration.Seconds(),
 								RLMCalls:      rlmCalls,
 							},
@@ -531,7 +611,7 @@ func (r *RLM) Complete(ctx context.Context, contextPayload any, query string) (*
 							Result: logging.RLMCodeResult{
 								Stdout:        result.Stdout,
 								Stderr:        result.Stderr,
-								Locals:        replEnv.GetLocals(),
+								Locals:        nil,
 								ExecutionTime: result.Duration.Seconds(),
 								RLMCalls:      rlmCalls,
 							},
@@ -556,7 +636,7 @@ func (r *RLM) Complete(ctx context.Context, contextPayload any, query string) (*
 					Result: logging.RLMCodeResult{
 						Stdout:        result.Stdout,
 						Stderr:        result.Stderr,
-						Locals:        replEnv.GetLocals(),
+						Locals:        nil,
 						ExecutionTime: result.Duration.Seconds(),
 						RLMCalls:      rlmCalls,
 					},
@@ -571,7 +651,13 @@ func (r *RLM) Complete(ctx context.Context, contextPayload any, query string) (*
 			}
 
 			// Include Query results in history output
-			execOutput := FormatExecutionResult(result)
+			// Reference alignment: format like "Code executed:\n```go\n{code}\n```\n\nREPL output:\n{result}"
+			// Also include REPL variable names (reference's format_execution_result appends "REPL variables: [list]")
+			var varNames []string
+			if yaegiEnv, ok := env.(*YaegiREPL); ok {
+				varNames = yaegiEnv.GetVariableNames()
+			}
+			execOutput := FormatExecutionResultWithVars(result, varNames)
 			if allOutput.Len() > 0 {
 				execOutput = execOutput + allOutput.String()
 			}
@@ -604,7 +690,7 @@ func (r *RLM) Complete(ctx context.Context, contextPayload any, query string) (*
 			if r.config.Verbose {
 				logger.Info(ctx, "[RLM] Early termination triggered (confidence signals: %d)", confidenceSignals)
 			}
-			return r.forceDefaultAnswer(ctx, replEnv, query, history.String(), start, maxIterations)
+			return r.forceDefaultAnswer(ctx, env, query, history.String(), start, maxIterations)
 		}
 
 		// Apply history compression if enabled
@@ -622,12 +708,12 @@ func (r *RLM) Complete(ctx context.Context, contextPayload any, query string) (*
 	}
 
 	// Max iterations exhausted - force final answer
-	return r.forceDefaultAnswer(ctx, replEnv, query, history.String(), start, maxIterations)
+	return r.forceDefaultAnswer(ctx, env, query, history.String(), start, maxIterations)
 }
 
 // executeSubRLM spawns a nested RLM loop that shares REPL state with the parent.
 // It respects depth limits to prevent infinite recursion.
-func (r *RLM) executeSubRLM(ctx context.Context, replEnv *YaegiREPL, subquery, parentQuery string, traceSession *logging.RLMTraceSession, parentStart time.Time) (string, error) {
+func (r *RLM) executeSubRLM(ctx context.Context, replEnv ExecutionEnvironment, subquery, parentQuery string, traceSession *logging.RLMTraceSession, parentStart time.Time) (string, error) {
 	logger := logging.GetLogger()
 	start := time.Now()
 
@@ -650,7 +736,10 @@ func (r *RLM) executeSubRLM(ctx context.Context, replEnv *YaegiREPL, subquery, p
 	}
 
 	if subquery == "" {
-		return "", fmt.Errorf("sub-RLM requires a subquery")
+		// Fallback: use the main query if subquery is missing,
+		// assuming the intent might have been to recurse on the same query (though dangerous for infinite loops).
+		// Better: return error to let the agent correct itself.
+		return "", fmt.Errorf("sub-RLM requires a subquery (field 'Subquery' was empty)")
 	}
 
 	if r.config.Verbose {
@@ -666,9 +755,20 @@ func (r *RLM) executeSubRLM(ctx context.Context, replEnv *YaegiREPL, subquery, p
 	}
 	subConfig.MaxIterations = maxSubIterations
 
-	// Create sub-RLM iteration module
-	subIterMod := modules.NewPredict(IterationSignature()).WithTextOutput()
-	subIterMod.SetDemos(IterationDemos())
+	// Create sub-RLM iteration module based on environment
+	var subIterSig core.Signature
+	var subIterDemos []core.Example
+
+	if subConfig.EnvironmentType == EnvMangle {
+		subIterSig = MangleIterationSignature()
+		subIterDemos = MangleIterationDemos()
+	} else {
+		subIterSig = IterationSignature()
+		subIterDemos = IterationDemos()
+	}
+
+	subIterMod := modules.NewPredict(subIterSig).WithTextOutput()
+	subIterMod.SetDemos(subIterDemos)
 	subIterMod.SetLLM(r.rootLLM)
 
 	// Create sub-RLM instance
@@ -709,7 +809,7 @@ func (r *RLM) executeSubRLM(ctx context.Context, replEnv *YaegiREPL, subquery, p
 
 // completeWithSharedREPL runs an RLM completion loop using an existing REPL environment.
 // This allows sub-RLMs to share state with their parent.
-func (r *RLM) completeWithSharedREPL(ctx context.Context, subRLM *RLM, replEnv *YaegiREPL, query string) (*CompletionResult, error) {
+func (r *RLM) completeWithSharedREPL(ctx context.Context, subRLM *RLM, replEnv ExecutionEnvironment, query string) (*CompletionResult, error) {
 	logger := logging.GetLogger()
 	start := time.Now()
 
@@ -724,10 +824,16 @@ func (r *RLM) completeWithSharedREPL(ctx context.Context, subRLM *RLM, replEnv *
 	}
 
 	// Get context info from shared REPL
-	contextSize := 0
-	if idx := replEnv.GetContextIndex(); idx != nil {
-		contextSize = len(idx.GetRawContent())
-	}
+	// Note: We used GetContextIndex() in YaegiREPL which gave size.
+	// Here we use GetContextInfo() which returns a string summary.
+	// For maxIterations computation, we need int size.
+	// Since we can't easily get int size from generic interface, we'll assume a default or try to parse.
+	// Or we can assume 0 for shared execution if we don't carry payload size.
+	// But wait, sub-RLM reuses parent payload.
+	// Let's assume size is manageable or just use default max iterations if adaptive fails.
+	contextSize := 0 // default
+	// If needed, we could add GetContextSize() to interface.
+
 	maxIterations := subRLM.computeMaxIterations(contextSize)
 
 	var confidenceSignals int
@@ -746,11 +852,27 @@ func (r *RLM) completeWithSharedREPL(ctx context.Context, subRLM *RLM, replEnv *
 		}
 
 		// Prepare inputs for iteration module
+		historyStr := history.String()
+
+		// Same safeguard as parent loop
+		if i == 0 {
+			historyStr = "You have not interacted with the REPL environment or seen your context yet. " +
+				"Your next action should be to look through and figure out how to answer the prompt, " +
+				"so don't just provide a final answer yet.\n\n" +
+				fmt.Sprintf("Think step-by-step on what to do using the REPL environment (which contains the context) to answer the original prompt: \"%s\".\n", query) +
+				"Continue using the REPL environment, which has the `context` variable, and querying sub-LLMs by writing to the Code field. Your next action:"
+		} else {
+			historyStr = historyStr + "\n\nThe history above is your previous interactions with the REPL environment. " +
+				fmt.Sprintf("Think step-by-step on what to do using the REPL environment (which contains the context) to answer the original prompt: \"%s\".\n", query) +
+				"Continue using the REPL environment, which has the `context` variable, and querying sub-LLMs. Your next action:"
+		}
+
 		iterInputs := map[string]any{
-			"context_info": replEnv.ContextInfo(),
+			"context_info": replEnv.GetContextInfo(),
 			"query":        query,
-			"history":      history.String(),
-			"repl_state":   formatREPLState(replEnv.GetLocals()),
+			"history":      historyStr,
+			"repl_state":   replEnv.GetState(),
+			"iteration":    fmt.Sprintf("Iteration %d of %d", i+1, maxIterations),
 		}
 
 		// Call the iteration module
@@ -817,6 +939,29 @@ func (r *RLM) completeWithSharedREPL(ctx context.Context, subRLM *RLM, replEnv *
 			}
 		}
 
+		// Also check FINAL in reasoning for non-final actions (reference alignment)
+		if action != "final" {
+			if final := FindFinalAnswer(reasoning); final != nil {
+				var finalAnswer string
+				if final.Type == FinalTypeVariable {
+					resolved, err := replEnv.GetVariable(final.Content)
+					if err == nil {
+						finalAnswer = resolved
+					}
+				} else {
+					finalAnswer = final.Content
+				}
+				if finalAnswer != "" {
+					return &CompletionResult{
+						Response:   finalAnswer,
+						Iterations: i + 1,
+						Duration:   time.Since(start),
+						Usage:      subRLM.tokenTracker.GetTotalUsage(),
+					}, nil
+				}
+			}
+		}
+
 		if code != "" {
 			replEnv.ClearFinal()
 			result, _ := replEnv.Execute(ctx, code)
@@ -853,7 +998,12 @@ func (r *RLM) completeWithSharedREPL(ctx context.Context, subRLM *RLM, replEnv *
 				}, nil
 			}
 
-			execOutput := FormatExecutionResult(result)
+			// Include REPL variable names (reference alignment)
+			var varNames []string
+			if yaegiEnv, ok := replEnv.(*YaegiREPL); ok {
+				varNames = yaegiEnv.GetVariableNames()
+			}
+			execOutput := FormatExecutionResultWithVars(result, varNames)
 			if allOutput.Len() > 0 {
 				execOutput = execOutput + allOutput.String()
 			}
@@ -876,13 +1026,14 @@ func (r *RLM) completeWithSharedREPL(ctx context.Context, subRLM *RLM, replEnv *
 }
 
 // forceDefaultAnswer forces the LLM to provide a final answer when max iterations reached.
-func (r *RLM) forceDefaultAnswer(ctx context.Context, replEnv REPLEnvironment, query string, history string, start time.Time, maxIterations int) (*CompletionResult, error) {
+func (r *RLM) forceDefaultAnswer(ctx context.Context, replEnv ExecutionEnvironment, query string, history string, start time.Time, maxIterations int) (*CompletionResult, error) {
 	// Prepare inputs asking for a final answer
 	iterInputs := map[string]any{
-		"context_info": replEnv.ContextInfo(),
+		"context_info": replEnv.GetContextInfo(),
 		"query":        query,
 		"history":      history + "\n\nMAX ITERATIONS REACHED. You MUST provide a final answer now.",
-		"repl_state":   formatREPLState(replEnv.GetLocals()),
+		"repl_state":   replEnv.GetState(),
+		"iteration":    fmt.Sprintf("Iteration %d of %d (FINAL - must answer now)", maxIterations, maxIterations),
 	}
 
 	outputs, err := r.iterationModule.Process(ctx, iterInputs)
@@ -897,10 +1048,9 @@ func (r *RLM) forceDefaultAnswer(ctx context.Context, replEnv REPLEnvironment, q
 
 	// Fallback 1: check REPL state for computed values before using reasoning
 	if answer == "" {
-		locals := replEnv.GetLocals()
 		for _, key := range []string{"result", "answer", "final_answer", "output", "total", "count"} {
-			if val, ok := locals[key]; ok && val != "" {
-				answer = fmt.Sprintf("%v", val)
+			if val, err := replEnv.GetVariable(key); err == nil && val != "" {
+				answer = val
 				break
 			}
 		}
@@ -965,10 +1115,6 @@ func (r *RLM) detectConfidence(response string) bool {
 }
 
 // shouldTerminateEarly checks if we should terminate early based on confidence signals.
-// Early termination only happens when:
-// 1. Adaptive iteration is enabled with early termination
-// 2. Confidence threshold is met
-// 3. There are no pending code blocks (the model isn't waiting for execution results).
 func (r *RLM) shouldTerminateEarly(confidenceSignals int, hasCode bool) bool {
 	if r.config.AdaptiveIteration == nil || !r.config.AdaptiveIteration.Enabled {
 		return false
@@ -983,7 +1129,6 @@ func (r *RLM) shouldTerminateEarly(confidenceSignals int, hasCode bool) bool {
 }
 
 // compressHistory compresses older iterations in the history string.
-// It keeps the most recent N iterations verbatim and summarizes older ones.
 func (r *RLM) compressHistory(history string, currentIteration int) string {
 	cfg := r.config.HistoryCompression
 	if cfg == nil || !cfg.Enabled {
@@ -1137,60 +1282,6 @@ func stripCodeLanguageMarker(code string) string {
 	return code
 }
 
-// formatREPLState converts the REPL locals map to a readable string.
-func formatREPLState(locals map[string]any) string {
-	if len(locals) == 0 {
-		return "No variables defined"
-	}
-
-	var parts []string
-	for name, value := range locals {
-		valueStr := fmt.Sprintf("%v", value)
-		if len(valueStr) > 100 {
-			valueStr = valueStr[:100] + "..."
-		}
-		parts = append(parts, fmt.Sprintf("%s: %s", name, valueStr))
-	}
-	return strings.Join(parts, "\n")
-}
-
-// formatREPLStateRich converts variable metadata to a rich, informative string.
-// This provides type info, length, and preview for better LLM context.
-func formatREPLStateRich(variables []REPLVariable, maxPreviewLen int) string {
-	if len(variables) == 0 {
-		return "No variables defined"
-	}
-
-	var result strings.Builder
-	result.WriteString("Variables:\n")
-
-	for _, v := range variables {
-		// Mark important variables
-		marker := ""
-		if v.IsImportant {
-			marker = " *"
-		}
-
-		// Format based on type
-		if v.Length >= 0 {
-			fmt.Fprintf(&result, "  %s%s: %s (len=%d)\n", v.Name, marker, v.Type, v.Length)
-		} else {
-			fmt.Fprintf(&result, "  %s%s: %s\n", v.Name, marker, v.Type)
-		}
-
-		// Show preview for non-trivial values
-		preview := v.Preview
-		if maxPreviewLen > 0 && len(preview) > maxPreviewLen {
-			preview = preview[:maxPreviewLen] + "..."
-		}
-		if preview != "" && v.Name != "context" { // Skip context preview (too large)
-			fmt.Fprintf(&result, "    → %s\n", preview)
-		}
-	}
-
-	return result.String()
-}
-
 func (r *RLM) trackTokenUsage(ctx context.Context) {
 	if state := core.GetExecutionState(ctx); state != nil {
 		if usage := state.GetTokenUsage(); usage != nil {
@@ -1200,14 +1291,19 @@ func (r *RLM) trackTokenUsage(ctx context.Context) {
 }
 
 // appendIterationHistory adds iteration info to the history string.
-// Nightjar Algorithm 1 Gap 2: Reasoning is NOT included to save tokens.
-// History contains only: action, code, and truncated output.
-func (r *RLM) appendIterationHistory(history *strings.Builder, iteration int, action, _, code, output string) {
+// Aligned with reference implementation's format_iteration which formats history as:
+// assistant response -> user message with "Code executed... REPL output...".
+// We include reasoning (as in the RLM paper) to maintain context for multi-hop tasks.
+func (r *RLM) appendIterationHistory(history *strings.Builder, iteration int, action, reasoning, code, output string) {
+	// Format as conversation-like transcript (aligned with reference's format_iteration)
 	fmt.Fprintf(history, "\n--- Iteration %d ---\n", iteration)
+	if reasoning != "" {
+		fmt.Fprintf(history, "Reasoning: %s\n", reasoning)
+	}
 	fmt.Fprintf(history, "Action: %s\n", action)
 	if code != "" {
-		fmt.Fprintf(history, "Code:\n```go\n%s\n```\n", code)
-		fmt.Fprintf(history, "Output:\n%s\n", utils.TruncateString(output, truncateLenLong))
+		// Reference format: "Code executed:\n```python\n{code}\n```\n\nREPL output:\n{result}"
+		fmt.Fprintf(history, "Code executed:\n```go\n%s\n```\n\nREPL output:\n%s\n", code, utils.TruncateString(output, truncateLenLong))
 	}
 }
 

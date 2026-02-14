@@ -72,9 +72,9 @@ func (m *mockLLM) Capabilities() []core.Capability {
 
 // mockSubLLMClient implements SubLLMClient for testing.
 type mockSubLLMClient struct {
-	queryResponse        string
-	batchedResponses     []string
-	queryPromptTokens    int
+	queryResponse         string
+	batchedResponses      []string
+	queryPromptTokens     int
 	queryCompletionTokens int
 }
 
@@ -447,15 +447,15 @@ func TestFormatExecutionResult(t *testing.T) {
 			expected: "output\n\nerror",
 		},
 		{
-			name: "empty result",
-			result: &ExecutionResult{},
+			name:     "empty result",
+			result:   &ExecutionResult{},
 			expected: "No output",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := FormatExecutionResult(tt.result)
+			result := FormatExecutionResult(*tt.result)
 			assert.Equal(t, tt.expected, result)
 		})
 	}
@@ -628,10 +628,10 @@ func TestComputeMaxIterations(t *testing.T) {
 	mockSub := &mockSubLLMClient{}
 
 	tests := []struct {
-		name         string
-		contextSize  int
-		config       Config
-		expectedMax  int
+		name        string
+		contextSize int
+		config      Config
+		expectedMax int
 	}{
 		{
 			name:        "adaptive disabled uses config max",
@@ -750,8 +750,8 @@ test4
 
 	// Should contain summary of iterations 1-2 and verbatim 3-4
 	assert.Contains(t, compressed, "[Previous iterations summary]")
-	assert.Contains(t, compressed, "--- Iteration 3 ---") // Verbatim
-	assert.Contains(t, compressed, "--- Iteration 4 ---") // Verbatim
+	assert.Contains(t, compressed, "--- Iteration 3 ---")          // Verbatim
+	assert.Contains(t, compressed, "--- Iteration 4 ---")          // Verbatim
 	assert.NotContains(t, compressed, "Looking at the first part") // Summarized
 }
 
@@ -1658,21 +1658,27 @@ func TestImmutableHistory(t *testing.T) {
 	assert.Contains(t, truncatedStr, "...")
 }
 
-// TestFormatREPLStateRich tests the rich variable formatting.
-func TestFormatREPLStateRich(t *testing.T) {
-	vars := []REPLVariable{
-		{Name: "context", Type: "string", Length: 50000, Preview: "test data...", IsImportant: false},
-		{Name: "result", Type: "string", Length: 100, Preview: "computed answer", IsImportant: true},
-		{Name: "count", Type: "int", Length: -1, Preview: "42", IsImportant: true},
-	}
+// TestYaegiREPLGetState tests the GetState method which provides rich variable info.
+func TestYaegiREPLGetState(t *testing.T) {
+	client := &mockSubLLMClient{queryResponse: "test"}
+	repl, err := NewYaegiREPL(client)
+	require.NoError(t, err)
 
-	result := formatREPLStateRich(vars, 50)
+	// Set up some variables
+	ctx := context.Background()
+	_, err = repl.Execute(ctx, `context := "test data..."`) // context is special
+	require.NoError(t, err)
+	_, err = repl.Execute(ctx, `result := "computed answer"`)
+	require.NoError(t, err)
+	_, err = repl.Execute(ctx, `count := 42`)
+	require.NoError(t, err)
 
-	assert.Contains(t, result, "Variables:")
-	assert.Contains(t, result, "context: string (len=50000)")
-	assert.Contains(t, result, "result *: string (len=100)") // Important marked with *
-	assert.Contains(t, result, "count *: int")
-	assert.Contains(t, result, "→ computed answer") // Preview shown
-	assert.Contains(t, result, "→ 42")
-	// Context preview should be skipped (too large)
+	// Get state string
+	state := repl.GetState()
+
+	// Verify output format
+	assert.Contains(t, state, "context (string): test data...")
+	assert.Contains(t, state, "result (string): computed answer")
+	assert.Contains(t, state, "count (int): 42")
+	// Note: exact format depends on GetState implementation
 }
